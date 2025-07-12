@@ -1,6 +1,66 @@
 import { ReviewRequest, ReviewResult } from '../types.js';
 import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
+
+// Enums for better type safety
+export enum Severity {
+  Critical = 'critical',
+  Major = 'major',
+  Minor = 'minor',
+  Suggestion = 'suggestion'
+}
+
+export enum Category {
+  Architecture = 'architecture',
+  Design = 'design',
+  Bug = 'bug',
+  Performance = 'performance',
+  Style = 'style',
+  Security = 'security',
+  MissingFeature = 'missing_feature'
+}
+
+export enum AssessmentResult {
+  NeedsChanges = 'needs_changes',
+  LgtmWithSuggestions = 'lgtm_with_suggestions',
+  Lgtm = 'lgtm'
+}
+
+// Constants
+const MAX_DOC_LENGTH = 5000;
+const TRUNCATION_SUFFIX = '\n... (truncated)';
+
+const REVIEW_PRIORITIES = `## Review Priorities
+1. **Design Compliance** - Architecture alignment with docs
+2. **Missing Requirements** - Required features/fields  
+3. **Structural Issues** - Interfaces, patterns, dependencies
+4. **Implementation Quality** - Bugs, security, performance`;
+
+const JSON_OUTPUT_INSTRUCTIONS = `Output ONLY a valid JSON object with the review structure. No other text before or after.`;
+
+// Helper functions
+function readDocumentContent(docPath: string, maxLength: number = MAX_DOC_LENGTH): string {
+  try {
+    if (!existsSync(docPath)) return `(File not found: ${docPath})`;
+    const content = readFileSync(docPath, 'utf-8');
+    return smartTruncate(content, maxLength);
+  } catch (error) {
+    return `(Error reading file: ${error instanceof Error ? error.message : 'Unknown error'})`;
+  }
+}
+
+function smartTruncate(content: string, maxLength: number): string {
+  if (content.length <= maxLength) return content;
+  
+  // Try to truncate at sensible boundaries
+  const truncatePoints = ['\n\n', '\n}', '\n]', '\n'];
+  for (const point of truncatePoints) {
+    const lastIndex = content.lastIndexOf(point, maxLength);
+    if (lastIndex > maxLength * 0.8) {
+      return content.substring(0, lastIndex) + TRUNCATION_SUFFIX;
+    }
+  }
+  return content.substring(0, maxLength) + TRUNCATION_SUFFIX;
+}
 
 export function generateReviewPrompt(
   request: ReviewRequest,
@@ -11,129 +71,99 @@ export function generateReviewPrompt(
   const relevantDocs = request.relevant_docs || [];
   const focusAreas = request.focus_areas || [];
   
-  // For resume mode, send minimal prompt with just the new information
-  if (isResume) {
+  // For resume mode, send minimal prompt with context from previous round
+  if (isResume && previousRounds && previousRounds.length > 0) {
+    const lastRound = previousRounds[previousRounds.length - 1];
+    const unresolvedCritical = lastRound.comments.filter(c => c.severity === 'critical').length;
+    
     return `## Follow-up Review Request
+
+Previous Assessment: ${lastRound.overall_assessment}
+Unresolved Critical Issues: ${unresolvedCritical}
 
 ${request.summary}
 
-## Changed Files Since Last Review
+## Changes Since Last Review
 ${changedFiles.join('\n')}
 
-${focusAreas.length > 0 ? `## Focus Areas for This Round\n${focusAreas.join('\n')}` : ''}
+${focusAreas.length > 0 ? `## Focus Areas\n${focusAreas.join('\n')}` : ''}
 
 ${request.test_command ? `## Test Command\n\`${request.test_command}\`` : ''}
 
-Please review the changes and provide your assessment in the same JSON format as before.`;
+Focus on whether previous issues were addressed. ${JSON_OUTPUT_INSTRUCTIONS}`;
   }
   
+  // Build test instructions
+  const testInstructions = request.test_command 
+    ? `Run tests with: \`${request.test_command}\` and include results.`
+    : 'No test command provided - set test_results.passed to null.';
+
   // Original full prompt for initial reviews
-  let prompt = `You are a senior software engineer conducting a code review. Your primary goal is to ensure the implementation correctly follows the design documents and architectural decisions.
+  let prompt = `You are a senior software engineer conducting a code review. Ensure the implementation follows design documents and architectural decisions.
 
 ## Review Request
 ${request.summary}
 
 ## Relevant Documentation
-${relevantDocs.length > 0 ? relevantDocs.join(', ') : 'No specific documentation referenced'}
+${relevantDocs.length > 0 ? relevantDocs.join(', ') : 'None'}
 
 ## Changed Files
 ${changedFiles.join('\n')}
 
 ## Focus Areas
-${focusAreas.length > 0 ? focusAreas.join('\n') : 'No specific focus areas'}
+${focusAreas.length > 0 ? focusAreas.join('\n') : 'General review'}
 
 ## Test Command
-${request.test_command ? `Test command available: \`${request.test_command}\`
-You should run this command using the Bash tool to validate that tests pass.` : 'No test command provided - skip test validation.'}
+${testInstructions}
 
-## Review Priorities (in order of importance)
-
-1. **Design Compliance** (MOST CRITICAL)
-   - Does the implementation follow the architecture described in design docs?
-   - Are data models and schemas aligned with specifications?
-   - Are the relationships between entities correct?
-   - Does the code respect the intended boundaries and abstractions?
-
-2. **Missing Requirements**
-   - What required fields, methods, or features are missing?
-   - Are all specified behaviors implemented?
-   - Do data structures contain all necessary properties?
-
-3. **Structural Issues**
-   - Are interfaces and contracts properly defined?
-   - Is the code organized according to the architectural patterns?
-   - Are dependencies flowing in the right direction?
-
-4. **Implementation Quality**
-   - Bugs, security issues, and performance problems
-   - Code modularity and SOLID principles
-   - Test coverage and quality
-   - Error handling and edge cases
+${REVIEW_PRIORITIES}
 
 ## Previous Review Rounds
-${previousRounds ? formatPreviousRounds(previousRounds) : 'This is the first review round.'}
+${previousRounds ? formatPreviousRounds(previousRounds) : 'First review.'}
 
-## Review Output Format
+## Instructions
+Focus on architectural issues over minor style issues. ${JSON_OUTPUT_INSTRUCTIONS}
 
-Focus on high-level architectural issues first. Line-by-line nitpicks are less important than design compliance.
-
-IMPORTANT: You must output ONLY a valid JSON object with no other text before or after. Do not use any tools or request additional information. Output the review as a single JSON object with the following structure:
+JSON Structure:
 {
   "design_compliance": {
-    "follows_architecture": true/false,
-    "major_violations": [
-      {
-        "issue": "Brief issue title",
-        "description": "Detailed description",
-        "impact": "critical|major|minor",
-        "recommendation": "Specific fix recommendation"
-      }
-    ]
+    "follows_architecture": boolean,
+    "major_violations": [{
+      "issue": string,
+      "description": string,
+      "impact": "critical|major|minor",
+      "recommendation": string
+    }]
   },
-  "comments": [
-    {
-      "type": "specific|general",
-      "file": "path/to/file.ts", // optional for specific comments
-      "line": 42, // optional for specific comments
-      "severity": "critical|major|minor|suggestion",
-      "category": "architecture|design|bug|performance|style|security|missing_feature",
-      "comment": "Detailed review comment",
-      "suggested_fix": "Optional code suggestion or architectural guidance"
-    }
-  ],
-  "missing_requirements": [
-    {
-      "requirement": "Description of missing requirement",
-      "design_doc_reference": "design.md#section", // optional
-      "severity": "critical|major|minor"
-    }
-  ],
+  "comments": [{
+    "type": "specific|general",
+    "file": string (optional),
+    "line": number (optional),
+    "severity": "${Object.values(Severity).join('|')}",
+    "category": "${Object.values(Category).join('|')}",
+    "comment": string,
+    "suggested_fix": string (optional)
+  }],
+  "missing_requirements": [{
+    "requirement": string,
+    "design_doc_reference": string (optional),
+    "severity": "critical|major|minor"
+  }],
   "test_results": {
-    "passed": true/false,
-    "summary": "Test execution summary",
-    "failing_tests": [], // list of test names if any failed
-    "coverage": "92%" // optional
+    "passed": boolean | null,
+    "summary": string,
+    "failing_tests": string[],
+    "coverage": string (optional)
   },
-  "overall_assessment": "needs_changes|lgtm_with_suggestions|lgtm"
-}
-
-Before giving LGTM:
-1. If a test command was provided above, run it using the Bash tool and include the results in your test_results.
-2. If no test command was provided, set test_results.passed to null and include a note that tests were not validated.
-3. Verify the implementation follows the design architecture.`;
+  "overall_assessment": "${Object.values(AssessmentResult).join('|')}"
+}`;
 
   // Include relevant documentation content if files exist
   if (relevantDocs.length > 0) {
     prompt += '\n\n## Referenced Documentation Content\n';
     for (const doc of relevantDocs) {
-      if (existsSync(doc)) {
-        try {
-          const content = readFileSync(doc, 'utf-8');
-          prompt += `\n### ${doc}\n\`\`\`\n${content.substring(0, 5000)}${content.length > 5000 ? '\n... (truncated)' : ''}\n\`\`\`\n`;
-        } catch (error) {
-          prompt += `\n### ${doc}\n(Unable to read file)\n`;
-        }
-      }
+      const content = readDocumentContent(doc);
+      prompt += `\n### ${doc}\n\`\`\`\n${content}\n\`\`\`\n`;
     }
   }
 
@@ -142,18 +172,9 @@ Before giving LGTM:
 
 function formatPreviousRounds(rounds: ReviewResult[]): string {
   return rounds.map((round, index) => {
-    const criticalIssues = round.comments.filter(c => c.severity === 'critical');
-    const majorIssues = round.comments.filter(c => c.severity === 'major');
+    const criticalCount = round.comments.filter(c => c.severity === 'critical').length;
+    const majorCount = round.comments.filter(c => c.severity === 'major').length;
     
-    return `### Round ${index + 1}
-- Status: ${round.status}
-- Design Violations: ${round.design_compliance.major_violations.length}
-- Critical Issues: ${criticalIssues.length}
-- Major Issues: ${majorIssues.length}
-- Overall Assessment: ${round.overall_assessment}
-
-Key Issues from Previous Round:
-${round.design_compliance.major_violations.map(v => `- ${v.issue}: ${v.description}`).join('\n')}
-${criticalIssues.map(c => `- ${c.comment}`).join('\n')}`;
-  }).join('\n\n');
+    return `Round ${index + 1}: ${round.overall_assessment} (${criticalCount} critical, ${majorCount} major issues)`;
+  }).join('\n');
 }

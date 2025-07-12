@@ -155,6 +155,11 @@ export class RequestReviewHandler {
       await storage.updateSession(reviewId, updatedSession);
     }
     
+    logger.info('Code review completed', { 
+      reviewId: review.review_id,
+      assessment: review.overall_assessment 
+    });
+    
     return review;
   }
   
@@ -177,7 +182,7 @@ export class RequestReviewHandler {
           focus_areas: {
             type: 'array', 
             items: { type: 'string' },
-            description: 'Specific areas to focus review on'
+            description: 'List of specific areas to focus review on'
           },
           previous_review_id: {
             type: 'string',
