@@ -1,5 +1,5 @@
 version: 4.27.0
-installed_at: '2025-07-12T03:07:31.620Z'
+installed_at: '2025-07-12T15:29:20.514Z'
 install_type: full
 agent: null
 ides_setup:
@@ -181,7 +181,7 @@ files:
     hash: 62cc88191b0a3730
     modified: false
   - path: .bmad-core/agents/bmad-master.md
-    hash: 9c1cdae1f357de1e
+    hash: 56821e70d7e5711f
     modified: false
   - path: .bmad-core/agents/architect.md
     hash: 6b60571283968b6d
